@@ -1543,34 +1543,94 @@ async function loadMovieById(id) {
 async function loadSuggestions() {
   const grid = document.getElementById('suggestionsGrid');
 
-  // Tenta sessionStorage primeiro (cache da sessão)
-  try {
-    const cached = sessionStorage.getItem('cinelist_all_movies');
-    if (cached) {
-      allMovies = JSON.parse(cached);
-      renderSuggestions(allMovies);
-      return;
-    }
-  } catch(e) {}
-
-  if (!ghCfg.repo) {
-    grid.innerHTML = '<p style="color:var(--muted);font-size:0.8rem;grid-column:1/-1">Configure o repositório para ver sugestões.</p>';
-    return;
+  // Tenta primeiro pelo GitHub (se configurado)
+  if (ghCfg.repo) {
+    try {
+      const cached = sessionStorage.getItem('cinelist_all_movies');
+      if (cached) {
+        allMovies = JSON.parse(cached);
+        renderSuggestions(allMovies);
+        return;
+      }
+      const base = ghCfg.path ? ghCfg.path + '/' : '';
+      const url  = `https://api.github.com/repos/${ghCfg.repo}/contents/${base}filmes.json`;
+      const r    = await fetch(url, { headers: { Accept: 'application/vnd.github.v3+json' }});
+      if (r.ok) {
+        const d    = await r.json();
+        const list = JSON.parse(decodeURIComponent(escape(atob(d.content.replace(/\n/g,'')))));
+        allMovies  = Array.isArray(list) ? list : (list.movies || []);
+        sessionStorage.setItem('cinelist_all_movies', JSON.stringify(allMovies));
+        renderSuggestions(allMovies);
+        return;
+      }
+    } catch(e) {}
   }
 
-  try {
-    const base = ghCfg.path ? ghCfg.path + '/' : '';
-    const url  = `https://api.github.com/repos/${ghCfg.repo}/contents/${base}filmes.json`;
-    const r    = await fetch(url, { headers: { Accept: 'application/vnd.github.v3+json' }});
-    if (!r.ok) throw new Error('GitHub ' + r.status);
-    const d    = await r.json();
-    const list = JSON.parse(decodeURIComponent(escape(atob(d.content.replace(/\n/g,'')))));
-    allMovies  = Array.isArray(list) ? list : (list.movies || []);
-    sessionStorage.setItem('cinelist_all_movies', JSON.stringify(allMovies));
-    renderSuggestions(allMovies);
-  } catch(e) {
-    grid.innerHTML = '<p style="color:var(--muted);font-size:0.8rem;grid-column:1/-1">Não foi possível carregar sugestões.</p>';
+  // Fallback: busca filmes similares direto no TMDB
+  const tmdbId = currentMovie ? (currentMovie.id || currentMovie.tmdb_id) : null;
+  if (tmdbId) {
+    try {
+      const r = await fetch(
+        `https://api.themoviedb.org/3/movie/${tmdbId}/similar?api_key=${TMDB_KEY}&language=pt-BR&page=1`
+      );
+      if (r.ok) {
+        const d = await r.json();
+        const results = (d.results || []).slice(0, 6);
+        renderTmdbSuggestions(results);
+        return;
+      }
+    } catch(e) {}
+
+    // Se similar falhar, usa popular
+    try {
+      const r = await fetch(
+        `https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_KEY}&language=pt-BR&page=1`
+      );
+      if (r.ok) {
+        const d = await r.json();
+        const results = (d.results || [])
+          .filter(m => String(m.id) !== String(tmdbId))
+          .slice(0, 6);
+        renderTmdbSuggestions(results);
+        return;
+      }
+    } catch(e) {}
   }
+
+  grid.innerHTML = '<p style="color:var(--muted);font-size:0.8rem;grid-column:1/-1">Não foi possível carregar sugestões.</p>';
+}
+
+function renderTmdbSuggestions(movies) {
+  const grid = document.getElementById('suggestionsGrid');
+
+  grid.innerHTML = movies.map(m => {
+    const t      = m.title || 'Sem título';
+    const id     = m.id    || '';
+    const poster = m.poster_path ? TMDB_IMG + m.poster_path : '';
+    const rat    = m.vote_average || 0;
+    const year   = (m.release_date || '').slice(0, 4);
+
+    const ratingHtml = rat ? `<div class="sug-rating">★ ${Number(rat).toFixed(1)}</div>` : '';
+    const imgHtml    = poster
+      ? `<img class="sug-img" src="${poster}" alt="${t}" loading="lazy">`
+      : `<img class="sug-img" src="" style="display:none">`;
+
+    const movieObj = { id, tmdb_id: id, titulo: t, title: t, poster, nota: rat,
+                       vote_average: rat, ano: year, year };
+
+    return `<div class="sug-card" data-tmdb="${id}" onclick="openMovie(${JSON.stringify(movieObj).replace(/"/g,'&quot;')})">
+      <div class="sug-poster-wrap">
+        ${imgHtml}
+        <div class="sug-no-poster" ${poster ? 'style="display:none"' : ''}>🎬</div>
+        ${ratingHtml}
+        <div class="sug-overlay"><button class="sug-play-btn">▶ Assistir</button></div>
+      </div>
+      <div class="sug-body">
+        <div class="sug-title">${t}</div>
+        <div class="sug-year">${year}</div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function renderSuggestions(movies) {
